@@ -22,6 +22,7 @@ import time
 from collections import deque
 from collections.abc import Iterable
 from dataclasses import dataclass
+from itertools import islice
 
 from loglens.parsers import Level, LogLine
 
@@ -99,6 +100,26 @@ class LineBuffer:
             if seq < first_seq or seq > last_seq:
                 return None
             return self._entries[seq - first_seq].line
+
+    def since(self, seq: int) -> list[tuple[int, LogLine]]:
+        """Entries with seq strictly greater than `seq`, oldest first.
+
+        O(new) via first-seq arithmetic.
+        """
+        with self._lock:
+            if not self._entries:
+                return []
+            first_seq = self._entries[0].seq
+            last_seq = self._entries[-1].seq
+            if seq >= last_seq:
+                return []
+            # Seqs of live entries are contiguous, so the count of entries
+            # newer than `seq` falls straight out of the endpoints - no scan
+            # needed to find where "new" starts.
+            count = last_seq - max(seq, first_seq - 1)
+            newest = list(islice(reversed(self._entries), count))
+            newest.reverse()
+            return [(entry.seq, entry.line) for entry in newest]
 
     def snapshot(self) -> list[tuple[int, LogLine]]:
         with self._lock:

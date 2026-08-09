@@ -119,6 +119,34 @@ def test_arrival_preserved_when_preset() -> None:
     assert line.arrival == 12345.5
 
 
+# -- since --------------------------------------------------------------------
+
+
+def test_since_returns_entries_after_seq_oldest_first() -> None:
+    buf = LineBuffer(capacity=10)
+    seqs = [buf.append(make_line(raw=str(i))) for i in range(5)]
+    result = buf.since(seqs[1])
+    assert [line.raw for _seq, line in result] == ["2", "3", "4"]
+    assert [seq for seq, _line in result] == seqs[2:]
+
+
+def test_since_seq_older_than_first_live_entry_returns_all_live() -> None:
+    buf = LineBuffer(capacity=3)
+    for i in range(6):
+        buf.append(make_line(raw=str(i)))
+    # capacity 3 evicted seqs 1-3; asking since seq 0 (older than anything
+    # still live) should return everything currently buffered.
+    result = buf.since(0)
+    assert [line.raw for _seq, line in result] == ["3", "4", "5"]
+
+
+def test_since_seq_equal_to_newest_returns_empty() -> None:
+    buf = LineBuffer(capacity=10)
+    buf.append(make_line(raw="a"))
+    last_seq = buf.append(make_line(raw="b"))
+    assert buf.since(last_seq) == []
+
+
 # -- view: pattern / errors_only ------------------------------------------------
 
 

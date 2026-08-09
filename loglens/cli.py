@@ -3,6 +3,7 @@
 import click
 
 from loglens import __version__
+from loglens.app import LogLensApp
 
 
 @click.command()
@@ -15,7 +16,8 @@ from loglens import __version__
 @click.version_option(version=__version__, prog_name="loglens")
 def main(files: tuple[str, ...]) -> None:
     """Tail and analyze one or more log FILES in a terminal UI."""
-    click.echo(f"loglens {__version__}: TUI starts here in an upcoming milestone")
+    app = LogLensApp(list(files))
+    app.run()
     raise SystemExit(0)
 
 
