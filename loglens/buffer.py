@@ -101,8 +101,9 @@ class LineBuffer:
                 return None
             return self._entries[seq - first_seq].line
 
-    def since(self, seq: int) -> list[tuple[int, LogLine]]:
-        """Entries with seq strictly greater than `seq`, oldest first.
+    def since(self, seq: int) -> list[tuple[int, LogLine, Level | None]]:
+        """Entries with seq strictly greater than `seq`, oldest first, with each
+        entry's effective level (continuation lines inherit their parent's level).
 
         O(new) via first-seq arithmetic.
         """
@@ -119,7 +120,7 @@ class LineBuffer:
             count = last_seq - max(seq, first_seq - 1)
             newest = list(islice(reversed(self._entries), count))
             newest.reverse()
-            return [(entry.seq, entry.line) for entry in newest]
+            return [(entry.seq, entry.line, entry.effective_level) for entry in newest]
 
     def snapshot(self) -> list[tuple[int, LogLine]]:
         with self._lock:
