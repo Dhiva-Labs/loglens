@@ -8,7 +8,7 @@ import time
 from collections.abc import Callable
 from pathlib import Path
 
-from textual.widgets import Input, RichLog, Static
+from textual.widgets import Input, RichLog, Sparkline, Static
 
 from loglens.app import LogLensApp, _badge_labels
 from loglens.parsers import Level, LogLine
@@ -606,3 +606,421 @@ async def test_refresh_view_respects_filters_from_full_snapshot(tmp_path: Path) 
         assert "Traceback" in rendered
         assert "frame one" in rendered
         assert "unrelated info" not in rendered
+
+
+# -- s: search -----------------------------------------------------------------------
+
+
+async def test_s_reveals_search_input_and_enter_finds_newest_match_current(
+    tmp_path: Path,
+) -> None:
+    file_a = tmp_path / "a.log"
+    file_a.write_text("seed\n")
+
+    app = LogLensApp([str(file_a)])
+    async with app.run_test() as pilot:
+        await pilot.pause()
+
+        input_widget = app.query_one("#search-input", Input)
+        assert input_widget.display is False
+
+        app.buffer.append(LogLine(source=str(file_a), raw="alpha needle one", message="x"))
+        app.buffer.append(LogLine(source=str(file_a), raw="beta no match", message="x"))
+        app.buffer.append(LogLine(source=str(file_a), raw="gamma needle two", message="x"))
+
+        rich_log = app.query_one("#tail-log", RichLog)
+        await _wait_for(lambda: "gamma needle two" in _rendered_text(rich_log), pilot)
+
+        await pilot.press("s")
+        await pilot.pause()
+        assert input_widget.display is True
+        assert app.focused is input_widget
+
+        await pilot.press(*"needle")
+        await pilot.pause()
+        await pilot.press("enter")
+        await pilot.pause()
+
+        assert input_widget.display is False
+        assert app.focused is rich_log
+        assert app.paused is True
+        assert len(app._search_matches) == 2
+
+        # The newest match ("gamma needle two", appended last) is current.
+        assert app._search_index == len(app._search_matches) - 1
+        newest_seq = app._search_matches[-1]
+        current_line = app.buffer.get(newest_seq)
+        assert current_line is not None
+        assert current_line.raw == "gamma needle two"
+
+        status = app.query_one("#status-bar", Static)
+        assert "match 2/2" in status.content.plain
+
+        # The current match's raw segment carries both the search highlight
+        # and the extra current-line emphasis.
+        text = app._format_line(current_line, newest_seq)
+        assert any(span.style == "black on yellow" for span in text.spans)
+        assert any(span.style == "bold" for span in text.spans)
+
+
+async def test_n_and_N_walk_and_wrap_reretrieving_off_window_matches(tmp_path: Path) -> None:
+    file_a = tmp_path / "a.log"
+    file_a.write_text("seed\n")
+
+    app = LogLensApp([str(file_a)])
+    async with app.run_test() as pilot:
+        await pilot.pause()
+
+        # Freeze the live view first: _poll streams new lines incrementally
+        # with no MAX_RENDER_LINES cap of its own (only RichLog's much
+        # larger max_lines applies), so a bulk append while live would just
+        # render everything. Pausing first and rendering with one explicit
+        # _refresh_view() call instead reproduces the capped-tail shape a
+        # long-running session would actually have - e.g. right after
+        # reopening a paused view or toggling a filter with a big backlog.
+        await pilot.press("p")
+        await pilot.pause()
+        assert app.paused is True
+
+        # A match near the very start, a large run of filler past
+        # MAX_RENDER_LINES, then a second match at the end - the first
+        # match is guaranteed to fall outside the default tail render.
+        app.buffer.append(LogLine(source=str(file_a), raw="needle FIRST", message="x"))
+        for i in range(1200):
+            app.buffer.append(LogLine(source=str(file_a), raw=f"filler {i}", message="x"))
+        app.buffer.append(LogLine(source=str(file_a), raw="needle LAST", message="x"))
+        app._refresh_view()
+
+        rich_log = app.query_one("#tail-log", RichLog)
+        assert "needle LAST" in _rendered_text(rich_log)
+        assert "needle FIRST" not in _rendered_text(rich_log)
+
+        await pilot.press("s")
+        await pilot.pause()
+        await pilot.press(*"needle")
+        await pilot.pause()
+        await pilot.press("enter")
+        await pilot.pause()
+
+        assert len(app._search_matches) == 2
+        assert app._search_index == 1
+        status = app.query_one("#status-bar", Static)
+        assert "match 2/2" in status.content.plain
+
+        # n: next OLDER match - "needle FIRST", off the currently rendered
+        # window, forcing a re-render centered on it.
+        await pilot.press("n")
+        await pilot.pause()
+
+        assert app._search_index == 0
+        assert "needle FIRST" in _rendered_text(rich_log)
+        status = app.query_one("#status-bar", Static)
+        assert "match 1/2" in status.content.plain
+
+        # n again wraps back around to the newest match.
+        await pilot.press("n")
+        await pilot.pause()
+        assert app._search_index == 1
+        status = app.query_one("#status-bar", Static)
+        assert "match 2/2" in status.content.plain
+
+        # N: back toward newer, wrapping from newest to oldest.
+        await pilot.press("N")
+        await pilot.pause()
+        assert app._search_index == 0
+        status = app.query_one("#status-bar", Static)
+        assert "match 1/2" in status.content.plain
+
+
+async def test_search_respects_active_errors_only_filter(tmp_path: Path) -> None:
+    file_a = tmp_path / "a.log"
+    file_a.write_text("seed\n")
+
+    app = LogLensApp([str(file_a)])
+    async with app.run_test() as pilot:
+        await pilot.pause()
+
+        app.buffer.append(
+            LogLine(source=str(file_a), raw="disk needle error", message="x", level=Level.ERROR)
+        )
+        app.buffer.append(
+            LogLine(source=str(file_a), raw="disk needle info", message="x", level=Level.INFO)
+        )
+
+        rich_log = app.query_one("#tail-log", RichLog)
+        await _wait_for(lambda: "disk needle info" in _rendered_text(rich_log), pilot)
+
+        await pilot.press("e")
+        await pilot.pause()
+
+        await pilot.press("s")
+        await pilot.pause()
+        await pilot.press(*"needle")
+        await pilot.pause()
+        await pilot.press("enter")
+        await pilot.pause()
+
+        # Only the ERROR line is a match - the INFO line matches the
+        # pattern but is excluded by errors-only, so search never sees it.
+        assert len(app._search_matches) == 1
+        matched_line = app.buffer.get(app._search_matches[0])
+        assert matched_line is not None
+        assert matched_line.level == Level.ERROR
+
+
+async def test_invalid_search_regex_keeps_previous_search_and_indicator(tmp_path: Path) -> None:
+    file_a = tmp_path / "a.log"
+    file_a.write_text("seed\n")
+
+    app = LogLensApp([str(file_a)])
+    async with app.run_test() as pilot:
+        await pilot.pause()
+
+        app.buffer.append(LogLine(source=str(file_a), raw="alpha needle", message="x"))
+        app.buffer.append(LogLine(source=str(file_a), raw="beta other", message="x"))
+
+        rich_log = app.query_one("#tail-log", RichLog)
+        await _wait_for(lambda: "beta other" in _rendered_text(rich_log), pilot)
+
+        input_widget = app.query_one("#search-input", Input)
+        status = app.query_one("#status-bar", Static)
+
+        await pilot.press("s")
+        await pilot.pause()
+        await pilot.press(*"needle")
+        await pilot.pause()
+        await pilot.press("enter")
+        await pilot.pause()
+
+        assert app._search_pattern is not None
+        assert app._search_pattern.pattern == "needle"
+        previous_matches = list(app._search_matches)
+        assert previous_matches
+
+        # Reopen (prefilled with "needle"), make it invalid, submit it.
+        await pilot.press("s")
+        await pilot.pause()
+        assert input_widget.value == "needle"
+        await pilot.press("(")
+        await pilot.pause()
+        await pilot.press("enter")
+        await pilot.pause()
+
+        # No crash, previous search preserved, indicator lit, input stays
+        # open (unlike the filter, submitting invalid search text doesn't
+        # hide the input - there's nothing live applied yet to hide behind).
+        assert input_widget.display is True
+        assert input_widget.has_class("filter-invalid")
+        assert "invalid search regex" in status.content.plain
+        assert app._search_pattern is not None
+        assert app._search_pattern.pattern == "needle"
+        assert app._search_matches == previous_matches
+
+        # Backspacing recovers and can be resubmitted cleanly.
+        await pilot.press("backspace")
+        await pilot.pause()
+        await pilot.press("enter")
+        await pilot.pause()
+
+        assert input_widget.display is False
+        assert not input_widget.has_class("filter-invalid")
+        assert "invalid search regex" not in status.content.plain
+
+
+async def test_escape_while_search_input_open_only_hides_it(tmp_path: Path) -> None:
+    file_a = tmp_path / "a.log"
+    file_a.write_text("seed\n")
+
+    app = LogLensApp([str(file_a)])
+    async with app.run_test() as pilot:
+        await pilot.pause()
+
+        app.buffer.append(LogLine(source=str(file_a), raw="alpha needle", message="x"))
+        app.buffer.append(LogLine(source=str(file_a), raw="alpha other", message="x"))
+
+        rich_log = app.query_one("#tail-log", RichLog)
+        await _wait_for(lambda: "alpha other" in _rendered_text(rich_log), pilot)
+
+        await pilot.press("/")
+        await pilot.pause()
+        await pilot.press(*"alpha")
+        await pilot.pause()
+        await pilot.press("enter")
+        await pilot.pause()
+        assert app.filter_pattern is not None
+        assert app.filter_pattern.pattern == "alpha"
+
+        input_widget = app.query_one("#search-input", Input)
+        await pilot.press("s")
+        await pilot.pause()
+        await pilot.press(*"needle")
+        await pilot.pause()
+        assert input_widget.display is True
+
+        await pilot.press("escape")
+        await pilot.pause()
+
+        assert input_widget.display is False
+        # Never submitted, so there was nothing to preserve or clear.
+        assert app._search_pattern is None
+        # The filter is untouched by this escape.
+        assert app.filter_pattern is not None
+        assert app.filter_pattern.pattern == "alpha"
+
+
+async def test_escape_with_active_search_clears_it_but_stays_paused_and_keeps_filter(
+    tmp_path: Path,
+) -> None:
+    file_a = tmp_path / "a.log"
+    file_a.write_text("seed\n")
+
+    app = LogLensApp([str(file_a)])
+    async with app.run_test() as pilot:
+        await pilot.pause()
+
+        app.buffer.append(LogLine(source=str(file_a), raw="alpha needle", message="x"))
+        app.buffer.append(LogLine(source=str(file_a), raw="alpha other", message="x"))
+
+        rich_log = app.query_one("#tail-log", RichLog)
+        await _wait_for(lambda: "alpha other" in _rendered_text(rich_log), pilot)
+
+        await pilot.press("/")
+        await pilot.pause()
+        await pilot.press(*"alpha")
+        await pilot.pause()
+        await pilot.press("enter")
+        await pilot.pause()
+        assert app.filter_pattern is not None
+
+        await pilot.press("s")
+        await pilot.pause()
+        await pilot.press(*"needle")
+        await pilot.pause()
+        await pilot.press("enter")
+        await pilot.pause()
+
+        assert app._search_pattern is not None
+        assert app.paused is True
+
+        await pilot.press("escape")
+        await pilot.pause()
+
+        assert app._search_pattern is None
+        assert app._search_matches == []
+        # Stays paused - only the search state changed.
+        assert app.paused is True
+        # The filter survives this escape untouched.
+        assert app.filter_pattern is not None
+        assert app.filter_pattern.pattern == "alpha"
+
+        status = app.query_one("#status-bar", Static)
+        assert "?" not in status.content.plain
+        assert "/alpha/" in status.content.plain
+
+
+async def test_resume_p_clears_search_state(tmp_path: Path) -> None:
+    file_a = tmp_path / "a.log"
+    file_a.write_text("seed\n")
+
+    app = LogLensApp([str(file_a)])
+    async with app.run_test() as pilot:
+        await pilot.pause()
+
+        app.buffer.append(LogLine(source=str(file_a), raw="alpha needle", message="x"))
+
+        rich_log = app.query_one("#tail-log", RichLog)
+        await _wait_for(lambda: "alpha needle" in _rendered_text(rich_log), pilot)
+
+        await pilot.press("s")
+        await pilot.pause()
+        await pilot.press(*"needle")
+        await pilot.pause()
+        await pilot.press("enter")
+        await pilot.pause()
+
+        assert app._search_pattern is not None
+        assert app.paused is True
+
+        # p resumes (search auto-paused us) and must drop search state too,
+        # since live-tailing and a frozen search view would otherwise fight
+        # over where the log is scrolled.
+        await pilot.press("p")
+        await pilot.pause()
+
+        assert app.paused is False
+        assert app._search_pattern is None
+        assert app._search_matches == []
+
+        status = app.query_one("#status-bar", Static)
+        assert "?" not in status.content.plain
+
+
+def test_format_line_highlights_all_search_matches() -> None:
+    app = LogLensApp(["a.log"])
+    app._search_pattern = re.compile("needle")
+    line = LogLine(source="a.log", raw="a needle then another needle", message="x")
+    text = app._format_line(line)
+    yellow_spans = [span for span in text.spans if span.style == "black on yellow"]
+    assert len(yellow_spans) == 2
+
+
+def test_format_line_bolds_only_the_current_match_line() -> None:
+    app = LogLensApp(["a.log"])
+    app._search_pattern = re.compile("needle")
+    app._search_matches = [7]
+    app._search_index = 0
+    line = LogLine(source="a.log", raw="find the needle in here", message="x")
+
+    current = app._format_line(line, seq=7)
+    assert any(span.style == "black on yellow" for span in current.spans)
+    assert any(span.style == "bold" for span in current.spans)
+
+    other = app._format_line(line, seq=99)
+    assert any(span.style == "black on yellow" for span in other.spans)
+    assert not any(span.style == "bold" for span in other.spans)
+
+    no_seq = app._format_line(line)
+    assert any(span.style == "black on yellow" for span in no_seq.spans)
+    assert not any(span.style == "bold" for span in no_seq.spans)
+
+
+# -- t: error histogram ---------------------------------------------------------------
+
+
+async def test_t_toggles_histogram_and_reflects_error_arrivals(tmp_path: Path) -> None:
+    file_a = tmp_path / "a.log"
+    file_a.write_text("seed\n")
+
+    app = LogLensApp([str(file_a)])
+    async with app.run_test() as pilot:
+        await pilot.pause()
+
+        container = app.query_one("#histogram")
+        assert container.display is False
+
+        now = time.time()
+        for offset in (5, 30, 90):
+            app.buffer.append(
+                LogLine(
+                    source=str(file_a),
+                    raw="boom",
+                    message="boom",
+                    level=Level.ERROR,
+                    arrival=now - offset,
+                )
+            )
+
+        await pilot.press("t")
+        await pilot.pause()
+
+        assert container.display is True
+        sparkline = app.query_one("#histogram-sparkline", Sparkline)
+        assert sparkline.data is not None
+        assert sum(sparkline.data) > 0
+
+        label = app.query_one("#histogram-label", Static)
+        assert "peak" in label.content
+
+        await pilot.press("t")
+        await pilot.pause()
+        assert container.display is False
