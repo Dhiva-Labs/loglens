@@ -8,9 +8,10 @@ import time
 from collections.abc import Callable
 from pathlib import Path
 
-from textual.widgets import Input, RichLog, Sparkline, Static
+from textual.widgets import Input, OptionList, RichLog, Sparkline, Static
 
-from loglens.app import LogLensApp, _badge_labels
+from loglens.app import ClusterScreen, LogLensApp, _badge_labels
+from loglens.buffer import LineBuffer
 from loglens.parsers import Level, LogLine
 
 
@@ -30,6 +31,23 @@ async def _wait_for(
 
 def _rendered_text(rich_log: RichLog) -> str:
     return "\n".join(strip.text for strip in rich_log.lines)
+
+
+def _append_error_with_trace(app: LogLensApp, source: str, *, row: int) -> None:
+    """Seed one ERROR head plus a traceback of continuation lines, all from
+    the same template - only `row` (embedded in a frame's line number and in
+    the exception message) varies between calls. cluster.py masks numbers
+    and drops line numbers from frame identity, so any number of calls with
+    different `row` values merge into a single cluster.
+    """
+    head = "unhandled exception while processing request"
+    app.buffer.append(LogLine(source=source, raw=head, message=head, level=Level.ERROR))
+    for raw in (
+        "Traceback (most recent call last):",
+        f'  File "app/handler.py", line {row}, in handle',
+        f"ValueError: bad thing happened id={row}",
+    ):
+        app.buffer.append(LogLine(source=source, raw=raw, message=raw, continuation=True))
 
 
 # -- badge helper (direct unit test) --------------------------------------------
@@ -1024,3 +1042,208 @@ async def test_t_toggles_histogram_and_reflects_error_arrivals(tmp_path: Path) -
         await pilot.press("t")
         await pilot.pause()
         assert container.display is False
+
+
+# -- c: error clustering panel ---------------------------------------------------------
+
+
+async def test_c_opens_panel_with_merged_cluster_counts(tmp_path: Path) -> None:
+    file_a = tmp_path / "a.log"
+    file_a.write_text("seed\n")
+
+    app = LogLensApp([str(file_a)])
+    async with app.run_test() as pilot:
+        await pilot.pause()
+
+        for row in range(5):
+            _append_error_with_trace(app, str(file_a), row=row)
+
+        await pilot.press("c")
+        await pilot.pause()
+
+        assert isinstance(app.screen, ClusterScreen)
+        options = app.screen.query_one("#cluster-options", OptionList)
+        assert options.option_count == 1
+        row_text = options.get_option_at_index(0).prompt.plain
+        assert "[×5]" in row_text
+
+
+async def test_c_with_empty_buffer_shows_empty_state(tmp_path: Path) -> None:
+    file_a = tmp_path / "a.log"
+    file_a.write_text("")
+
+    app = LogLensApp([str(file_a)])
+    async with app.run_test() as pilot:
+        await pilot.pause()
+
+        await pilot.press("c")
+        await pilot.pause()
+
+        assert isinstance(app.screen, ClusterScreen)
+        empty = app.screen.query_one("#cluster-empty", Static)
+        assert empty.display is True
+        assert "no errors in buffer" in empty.content.plain
+
+
+async def test_c_and_escape_close_panel_without_clearing_filter_underneath(
+    tmp_path: Path,
+) -> None:
+    file_a = tmp_path / "a.log"
+    file_a.write_text("seed\n")
+
+    app = LogLensApp([str(file_a)])
+    async with app.run_test() as pilot:
+        await pilot.pause()
+
+        await pilot.press("/")
+        await pilot.pause()
+        await pilot.press(*"needle")
+        await pilot.press("enter")
+        await pilot.pause()
+        assert app.filter_pattern is not None
+
+        await pilot.press("c")
+        await pilot.pause()
+        assert isinstance(app.screen, ClusterScreen)
+
+        # "c" while open closes it - the filter set up before opening must
+        # survive untouched.
+        await pilot.press("c")
+        await pilot.pause()
+        assert app._cluster_screen is None
+        assert not isinstance(app.screen, ClusterScreen)
+        assert app.filter_pattern is not None
+        assert app.filter_pattern.pattern == "needle"
+
+        await pilot.press("c")
+        await pilot.pause()
+        assert isinstance(app.screen, ClusterScreen)
+
+        # Escape while open must close the panel instead of falling through
+        # to the filter-clearing action it's normally bound to.
+        await pilot.press("escape")
+        await pilot.pause()
+        assert app._cluster_screen is None
+        assert not isinstance(app.screen, ClusterScreen)
+        assert app.filter_pattern is not None
+        assert app.filter_pattern.pattern == "needle"
+
+
+async def test_enter_on_row_pauses_and_jumps_to_newest_occurrence(tmp_path: Path) -> None:
+    file_a = tmp_path / "a.log"
+    file_a.write_text("seed\n")
+
+    app = LogLensApp([str(file_a)])
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        assert app.paused is False
+
+        # An older occurrence, a run of filler well past MAX_RENDER_LINES,
+        # then a newer occurrence of the same template - the same shape the
+        # off-window search test uses, so the jump exercises the real
+        # windowing/centering math instead of trivially landing on-screen.
+        _append_error_with_trace(app, str(file_a), row=1)
+        for i in range(1200):
+            app.buffer.append(LogLine(source=str(file_a), raw=f"filler {i}", message="x"))
+        _append_error_with_trace(app, str(file_a), row=999)
+
+        await pilot.press("c")
+        await pilot.pause()
+
+        options = app.screen.query_one("#cluster-options", OptionList)
+        assert options.option_count == 1
+
+        await pilot.press("enter")
+        await pilot.pause()
+
+        assert app._cluster_screen is None
+        assert not isinstance(app.screen, ClusterScreen)
+        assert app.paused is True
+
+        rich_log = app.query_one("#tail-log", RichLog)
+        assert "id=999" in _rendered_text(rich_log)
+
+
+async def test_cluster_panel_refreshes_live_every_2s_when_buffer_grows(tmp_path: Path) -> None:
+    file_a = tmp_path / "a.log"
+    file_a.write_text("seed\n")
+
+    app = LogLensApp([str(file_a)])
+    async with app.run_test() as pilot:
+        await pilot.pause()
+
+        _append_error_with_trace(app, str(file_a), row=1)
+
+        await pilot.press("c")
+        await pilot.pause()
+
+        options = app.screen.query_one("#cluster-options", OptionList)
+        assert "[×1]" in options.get_option_at_index(0).prompt.plain
+
+        _append_error_with_trace(app, str(file_a), row=2)
+        _append_error_with_trace(app, str(file_a), row=3)
+
+        await asyncio.sleep(2.1)
+        await pilot.pause()
+
+        options = app.screen.query_one("#cluster-options", OptionList)
+        assert "[×3]" in options.get_option_at_index(0).prompt.plain
+
+
+async def test_evicted_target_seq_shows_notice_without_crash(tmp_path: Path) -> None:
+    file_a = tmp_path / "a.log"
+    file_a.write_text("")
+
+    app = LogLensApp([str(file_a)])
+    app.buffer = LineBuffer(capacity=6)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+
+        _append_error_with_trace(app, str(file_a), row=1)
+
+        await pilot.press("c")
+        await pilot.pause()
+
+        assert isinstance(app.screen, ClusterScreen)
+        cluster_seq = app.screen._clusters[0].last_seq
+
+        # Push enough through the tiny buffer, while the panel is still
+        # open, to evict the line the selected row points at - without
+        # waiting long enough for the panel's own 2s refresh to notice.
+        for i in range(20):
+            app.buffer.append(LogLine(source=str(file_a), raw=f"pressure {i}", message="x"))
+        assert app.buffer.get(cluster_seq) is None
+
+        await pilot.press("enter")
+        await pilot.pause()
+
+        assert app._cluster_screen is None
+        assert not isinstance(app.screen, ClusterScreen)
+        # No jump, no pause flip, no crash - just the notice.
+        assert app.paused is False
+        messages = [notification.message for notification in app._notifications]
+        assert any("evicted" in message for message in messages)
+
+
+async def test_cluster_panel_ignores_active_filter_and_errors_only(tmp_path: Path) -> None:
+    file_a = tmp_path / "a.log"
+    file_a.write_text("seed\n")
+
+    app = LogLensApp([str(file_a)])
+    async with app.run_test() as pilot:
+        await pilot.pause()
+
+        for row in range(3):
+            _append_error_with_trace(app, str(file_a), row=row)
+
+        # A filter that would exclude every one of the seeded lines from the
+        # main view - clustering must not be affected by it.
+        app.filter_pattern = re.compile("this-matches-nothing-at-all")
+        app.errors_only = True
+
+        await pilot.press("c")
+        await pilot.pause()
+
+        options = app.screen.query_one("#cluster-options", OptionList)
+        assert options.option_count == 1
+        assert "[×3]" in options.get_option_at_index(0).prompt.plain

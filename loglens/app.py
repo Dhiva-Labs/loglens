@@ -21,10 +21,12 @@ from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Vertical
 from textual.css.query import NoMatches
-from textual.widgets import Footer, Input, RichLog, Sparkline, Static
+from textual.screen import ModalScreen
+from textual.widgets import Footer, Input, OptionList, RichLog, Sparkline, Static
 
 from loglens import __version__
 from loglens.buffer import LineBuffer
+from loglens.cluster import Cluster, cluster_errors, collect_error_records
 from loglens.parsers import Level, LogLine, parser_for_file
 from loglens.tailer import MultiTailer, read_tail
 
@@ -38,6 +40,7 @@ POLL_INTERVAL = 0.1
 HISTOGRAM_INTERVAL = 1.0
 HISTOGRAM_BUCKET_SECONDS = 60
 HISTOGRAM_BUCKETS = 15
+CLUSTER_REFRESH_INTERVAL = 2.0
 
 # Cycled by file order to give each tailed source a stable, distinct color.
 BADGE_COLORS: tuple[str, ...] = ("cyan", "magenta", "green", "yellow", "blue", "bright_red")
@@ -73,6 +76,136 @@ def _badge_labels(paths: Sequence[str]) -> dict[str, str]:
 
     width = max((len(label) for label in labels.values()), default=0)
     return {path: label.ljust(width) for path, label in labels.items()}
+
+
+class ClusterScreen(ModalScreen[int | None]):
+    """Modal panel listing error clusters over the whole buffer.
+
+    Computed once on mount, then refreshed on a timer - but only actually
+    recomputed when `buffer.total_appended` has moved since the last pass,
+    so an idle buffer costs nothing beyond the interval tick itself.
+
+    Deliberately ignores the main view's filter_pattern/errors_only: it
+    clusters over collect_error_records(buffer.since(0)) directly, so what's
+    listed here doesn't change depending on what the live view happens to be
+    narrowed to.
+
+    Dismisses with the last_seq of the selected cluster's newest occurrence
+    (for the app to auto-pause and jump to), or None if closed without a
+    selection.
+    """
+
+    BINDINGS: ClassVar[list[Binding]] = [
+        Binding("c", "close_panel", "Close", show=False),
+    ]
+
+    CSS = """
+    ClusterScreen {
+        align: center middle;
+    }
+
+    #cluster-panel {
+        width: 90%;
+        height: 80%;
+        background: $panel;
+        border: tall $primary;
+    }
+
+    #cluster-title {
+        height: 1;
+        padding: 0 1;
+        background: $boost;
+        color: $text;
+    }
+
+    #cluster-options {
+        height: 1fr;
+        border: none;
+    }
+
+    #cluster-empty {
+        height: 1fr;
+        content-align: center middle;
+        display: none;
+    }
+    """
+
+    def __init__(self, buffer: LineBuffer) -> None:
+        super().__init__()
+        self._buffer = buffer
+        self._clusters: list[Cluster] = []
+        # -1 never matches a real total_appended (>= 0), so the first
+        # _recompute (called from on_mount) always runs.
+        self._last_total = -1
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="cluster-panel"):
+            yield Static("", id="cluster-title")
+            yield OptionList(id="cluster-options")
+            yield Static(Text("no errors in buffer", style="dim"), id="cluster-empty")
+
+    def on_mount(self) -> None:
+        self._recompute()
+        self.set_interval(CLUSTER_REFRESH_INTERVAL, self._recompute)
+        self.query_one("#cluster-options", OptionList).focus()
+
+    def action_close_panel(self) -> None:
+        self.dismiss(None)
+
+    def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
+        event.stop()
+        index = event.option_index
+        if 0 <= index < len(self._clusters):
+            self.dismiss(self._clusters[index].last_seq)
+        else:
+            self.dismiss(None)
+
+    def _recompute(self) -> None:
+        total = self._buffer.total_appended
+        if total == self._last_total:
+            return
+        self._last_total = total
+        records = collect_error_records(self._buffer.since(0))
+        self._clusters = cluster_errors(records)
+        self._render_clusters(len(records))
+
+    def _render_clusters(self, records_count: int) -> None:
+        title = self.query_one("#cluster-title", Static)
+        options = self.query_one("#cluster-options", OptionList)
+        empty = self.query_one("#cluster-empty", Static)
+
+        title.update(
+            Text(
+                f"error clusters — {records_count} errors, {len(self._clusters)} clusters",
+                style="bold",
+            )
+        )
+
+        if not self._clusters:
+            options.clear_options()
+            options.display = False
+            empty.display = True
+            return
+
+        empty.display = False
+        options.display = True
+        previous = options.highlighted
+        options.clear_options()
+        for cluster in self._clusters:
+            options.add_option(self._row_text(cluster))
+        options.highlighted = 0 if previous is None else min(previous, len(self._clusters) - 1)
+
+    def _row_text(self, cluster: Cluster) -> Text:
+        text = Text()
+        text.append(f"[×{cluster.count}]".rjust(8), style="bold")
+        text.append("  ")
+        text.append(cluster.title)
+        text.append("  ")
+        source_count = len(cluster.sources)
+        source_word = "source" if source_count == 1 else "sources"
+        last_seen = datetime.fromtimestamp(cluster.example.head.arrival).strftime("%H:%M:%S")
+        text.append(f"{source_count} {source_word} · {last_seen}", style="dim")
+        return text
 
 
 class LogLensApp(App[None]):
@@ -129,6 +262,7 @@ class LogLensApp(App[None]):
         Binding("e", "toggle_errors_only", "Errors", show=True),
         Binding("p", "toggle_pause", "Pause", show=True),
         Binding("t", "toggle_histogram", "Histogram", show=True),
+        Binding("c", "toggle_cluster_panel", "Clusters", show=True),
         Binding("escape", "clear_filter", "Clear filter", show=False, priority=True),
     ]
 
@@ -173,6 +307,14 @@ class LogLensApp(App[None]):
         self._rendered_seqs: list[int] = []
 
         self._histogram_visible: bool = False
+
+        # Set while the error-clustering panel (c) is on screen; used both to
+        # ignore a redundant "c" from the main bindings (it can't actually
+        # fire while the modal has focus, but this also guards a re-entrant
+        # push) and so Escape can close the panel first (see
+        # action_clear_filter) instead of falling through to clear the
+        # filter underneath it.
+        self._cluster_screen: ClusterScreen | None = None
 
     # -- composition / lifecycle ------------------------------------------
 
@@ -415,6 +557,11 @@ class LogLensApp(App[None]):
     def action_clear_filter(self) -> None:
         """Escape, context-sensitive:
 
+        - cluster panel open -> close it, filter/search untouched. Checked
+          first and unconditionally: Escape is a priority binding, which
+          Textual resolves from the App down before it ever reaches a
+          pushed screen's own bindings, so this is the only place a modal
+          ClusterScreen can actually intercept it.
         - search input showing -> hide+cancel it only, active search results
           (if any) are left untouched.
         - else a search is active (has been run, matches or not) -> clear
@@ -422,6 +569,10 @@ class LogLensApp(App[None]):
         - else -> the original behavior: clear the filter outright, whether
           or not the filter input is showing.
         """
+        if self._cluster_screen is not None:
+            self._cluster_screen.dismiss(None)
+            return
+
         search_input = self.query_one("#search-input", Input)
         if search_input.display:
             self._hide_search_input()
@@ -605,6 +756,47 @@ class LogLensApp(App[None]):
         peak = max(counts) if counts else 0
         minutes = HISTOGRAM_BUCKET_SECONDS * HISTOGRAM_BUCKETS // 60
         return f"errors/min · {minutes}m · peak {peak}"
+
+    # -- error clustering (c) -----------------------------------------------------
+
+    def action_toggle_cluster_panel(self) -> None:
+        """Open the cluster panel. Textual keeps this from firing a second
+        time while the panel already has focus (its own "c" binding closes
+        it instead - see ClusterScreen), so this guard is just a safety net
+        against a re-entrant push.
+        """
+        if self._cluster_screen is not None:
+            return
+        screen = ClusterScreen(self.buffer)
+        self._cluster_screen = screen
+        self.push_screen(screen, callback=self._on_cluster_screen_dismissed)
+
+    def _on_cluster_screen_dismissed(self, target_seq: int | None) -> None:
+        """Called once the panel closes, however it closed.
+
+        `target_seq` is the last_seq of the row that was Entered, or None if
+        the panel was dismissed (c / Escape) without picking one - in which
+        case there's nothing left to do here.
+        """
+        self._cluster_screen = None
+        if target_seq is None:
+            return
+
+        if self.buffer.get(target_seq) is None:
+            # Evicted between the panel computing it and the row being
+            # picked - nothing sensible to jump to.
+            self.notify("that cluster's newest line has been evicted", severity="warning")
+            return
+
+        # Auto-pause first, exactly like a submitted search: jumping into
+        # history must not have the live tail immediately pull the view back
+        # to the end.
+        if not self.paused:
+            self.action_toggle_pause()
+
+        self._render_window(target_seq, force=True)
+        self.query_one("#tail-log", RichLog).focus()
+        self._refresh_status()
 
     # -- rendering -----------------------------------------------------------
 
