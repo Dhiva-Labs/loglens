@@ -10,7 +10,7 @@ from pathlib import Path
 
 from textual.widgets import Input, OptionList, RichLog, Sparkline, Static
 
-from loglens.app import ClusterScreen, LogLensApp, _badge_labels
+from loglens.app import MAX_RENDER_LINES, ClusterScreen, LogLensApp, _badge_labels
 from loglens.buffer import LineBuffer
 from loglens.parsers import Level, LogLine
 
@@ -1247,3 +1247,227 @@ async def test_cluster_panel_ignores_active_filter_and_errors_only(tmp_path: Pat
         options = app.screen.query_one("#cluster-options", OptionList)
         assert options.option_count == 1
         assert "[×3]" in options.get_option_at_index(0).prompt.plain
+
+
+# -- w: export filtered view -----------------------------------------------------------
+
+
+async def test_w_reveals_export_input_prefilled_with_default_filename(tmp_path: Path) -> None:
+    file_a = tmp_path / "a.log"
+    file_a.write_text("seed\n")
+
+    app = LogLensApp([str(file_a)])
+    async with app.run_test() as pilot:
+        await pilot.pause()
+
+        input_widget = app.query_one("#export-input", Input)
+        assert input_widget.display is False
+
+        await pilot.press("w")
+        await pilot.pause()
+
+        assert input_widget.display is True
+        assert app.focused is input_widget
+        assert re.match(r"^loglens-export-\d{8}-\d{6}\.log$", input_widget.value)
+
+
+async def test_export_with_no_filters_writes_every_buffered_line_in_order(
+    tmp_path: Path,
+) -> None:
+    file_a = tmp_path / "a.log"
+    file_a.write_text("seed\n")
+
+    app = LogLensApp([str(file_a)])
+    async with app.run_test() as pilot:
+        await pilot.pause()
+
+        app.buffer.append(LogLine(source=str(file_a), raw="line one", message="x"))
+        app.buffer.append(LogLine(source=str(file_a), raw="line two", message="x"))
+        app.buffer.append(LogLine(source=str(file_a), raw="line three", message="x"))
+
+        rich_log = app.query_one("#tail-log", RichLog)
+        await _wait_for(lambda: "line three" in _rendered_text(rich_log), pilot)
+
+        expected = [line.raw for _, line in app.buffer.snapshot()]
+
+        target = tmp_path / "out.log"
+        input_widget = app.query_one("#export-input", Input)
+
+        await pilot.press("w")
+        await pilot.pause()
+        input_widget.value = str(target)
+        await pilot.press("enter")
+        await pilot.pause()
+
+        assert input_widget.display is False
+        assert target.read_text().splitlines() == expected
+
+        messages = [notification.message for notification in app._notifications]
+        assert any(f"wrote {len(expected)} lines" in message for message in messages)
+
+
+async def test_export_with_filters_writes_only_filtered_lines_including_continuations(
+    tmp_path: Path,
+) -> None:
+    file_a = tmp_path / "a.log"
+    file_a.write_text("seed\n")
+
+    app = LogLensApp([str(file_a)])
+    async with app.run_test() as pilot:
+        await pilot.pause()
+
+        app.buffer.append(
+            LogLine(source=str(file_a), raw="disk full error", message="x", level=Level.ERROR)
+        )
+        app.buffer.append(
+            LogLine(
+                source=str(file_a),
+                raw="  disk io failure trace",
+                message="x",
+                continuation=True,
+            )
+        )
+        app.buffer.append(
+            LogLine(source=str(file_a), raw="disk ok info", message="x", level=Level.INFO)
+        )
+        app.buffer.append(
+            LogLine(source=str(file_a), raw="cpu spike error", message="x", level=Level.ERROR)
+        )
+
+        app.errors_only = True
+        app.filter_pattern = re.compile("disk")
+        app._refresh_view()
+
+        target = tmp_path / "filtered.log"
+        input_widget = app.query_one("#export-input", Input)
+
+        await pilot.press("w")
+        await pilot.pause()
+        input_widget.value = str(target)
+        await pilot.press("enter")
+        await pilot.pause()
+
+        assert target.read_text().splitlines() == [
+            "disk full error",
+            "  disk io failure trace",
+        ]
+
+
+async def test_export_to_existing_file_does_not_overwrite(tmp_path: Path) -> None:
+    file_a = tmp_path / "a.log"
+    file_a.write_text("seed\n")
+
+    target = tmp_path / "existing.log"
+    target.write_text("original content\n")
+
+    app = LogLensApp([str(file_a)])
+    async with app.run_test() as pilot:
+        await pilot.pause()
+
+        input_widget = app.query_one("#export-input", Input)
+        await pilot.press("w")
+        await pilot.pause()
+        input_widget.value = str(target)
+        await pilot.press("enter")
+        await pilot.pause()
+
+        assert target.read_text() == "original content\n"
+        assert input_widget.display is True
+
+        messages = [notification.message for notification in app._notifications]
+        assert any("exists" in message and str(target) in message for message in messages)
+
+
+async def test_export_to_unwritable_path_shows_error_without_crash(tmp_path: Path) -> None:
+    file_a = tmp_path / "a.log"
+    file_a.write_text("seed\n")
+
+    app = LogLensApp([str(file_a)])
+    async with app.run_test() as pilot:
+        await pilot.pause()
+
+        target = tmp_path / "no-such-dir" / "out.log"
+        input_widget = app.query_one("#export-input", Input)
+
+        await pilot.press("w")
+        await pilot.pause()
+        input_widget.value = str(target)
+        await pilot.press("enter")
+        await pilot.pause()
+
+        assert not target.exists()
+        assert input_widget.display is True
+
+        messages = [notification.message for notification in app._notifications]
+        assert messages
+
+
+async def test_escape_cancels_export_input_without_touching_filter_or_chain(
+    tmp_path: Path,
+) -> None:
+    file_a = tmp_path / "a.log"
+    file_a.write_text("seed\n")
+
+    app = LogLensApp([str(file_a)])
+    async with app.run_test() as pilot:
+        await pilot.pause()
+
+        await pilot.press("/")
+        await pilot.pause()
+        await pilot.press(*"seed")
+        await pilot.press("enter")
+        await pilot.pause()
+        assert app.filter_pattern is not None
+        assert app.filter_pattern.pattern == "seed"
+
+        export_input = app.query_one("#export-input", Input)
+        await pilot.press("w")
+        await pilot.pause()
+        assert export_input.display is True
+
+        await pilot.press("escape")
+        await pilot.pause()
+
+        assert export_input.display is False
+        # The filter set up before opening export must survive untouched.
+        assert app.filter_pattern is not None
+        assert app.filter_pattern.pattern == "seed"
+
+        # The rest of the escape chain still works afterwards: a plain
+        # escape now falls through to clearing the still-active filter.
+        await pilot.press("escape")
+        await pilot.pause()
+        assert app.filter_pattern is None
+
+
+async def test_export_includes_lines_beyond_max_render_lines_cap(tmp_path: Path) -> None:
+    file_a = tmp_path / "a.log"
+    file_a.write_text("seed\n")
+
+    app = LogLensApp([str(file_a)])
+    async with app.run_test() as pilot:
+        await pilot.pause()
+
+        await pilot.press("p")
+        await pilot.pause()
+
+        total = MAX_RENDER_LINES + 500
+        for i in range(total):
+            app.buffer.append(LogLine(source=str(file_a), raw=f"bulk {i}", message="x"))
+        app._refresh_view()
+
+        rich_log = app.query_one("#tail-log", RichLog)
+        assert "bulk 0" not in _rendered_text(rich_log)
+
+        expected = [line.raw for _, line in app.buffer.snapshot()]
+
+        target = tmp_path / "full.log"
+        input_widget = app.query_one("#export-input", Input)
+
+        await pilot.press("w")
+        await pilot.pause()
+        input_widget.value = str(target)
+        await pilot.press("enter")
+        await pilot.pause()
+
+        assert target.read_text().splitlines() == expected

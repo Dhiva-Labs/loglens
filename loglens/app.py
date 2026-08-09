@@ -228,7 +228,7 @@ class LogLensApp(App[None]):
         background: $surface;
     }
 
-    #filter-input, #search-input {
+    #filter-input, #search-input, #export-input {
         display: none;
     }
 
@@ -263,6 +263,7 @@ class LogLensApp(App[None]):
         Binding("p", "toggle_pause", "Pause", show=True),
         Binding("t", "toggle_histogram", "Histogram", show=True),
         Binding("c", "toggle_cluster_panel", "Clusters", show=True),
+        Binding("w", "focus_export", "Export", show=True),
         Binding("escape", "clear_filter", "Clear filter", show=False, priority=True),
     ]
 
@@ -338,6 +339,10 @@ class LogLensApp(App[None]):
         yield Input(
             placeholder="search buffer — Enter jumps, Esc cancels",
             id="search-input",
+        )
+        yield Input(
+            placeholder="export path — Enter writes, Esc cancels",
+            id="export-input",
         )
         yield Footer()
 
@@ -553,15 +558,21 @@ class LogLensApp(App[None]):
             self._hide_filter_input()
         elif event.input.id == "search-input":
             self._submit_search(event.input)
+        elif event.input.id == "export-input":
+            self._submit_export(event.input)
 
     def action_clear_filter(self) -> None:
         """Escape, context-sensitive:
 
-        - cluster panel open -> close it, filter/search untouched. Checked
-          first and unconditionally: Escape is a priority binding, which
-          Textual resolves from the App down before it ever reaches a
+        - cluster panel open -> close it, filter/search/export untouched.
+          Checked first and unconditionally: Escape is a priority binding,
+          which Textual resolves from the App down before it ever reaches a
           pushed screen's own bindings, so this is the only place a modal
           ClusterScreen can actually intercept it.
+        - export input showing -> hide+cancel it only, nothing else touched.
+          Export has no persisted "active" state the way filter/search do
+          (there's nothing left over once the input is gone), so this is
+          the only export-related check needed here.
         - search input showing -> hide+cancel it only, active search results
           (if any) are left untouched.
         - else a search is active (has been run, matches or not) -> clear
@@ -571,6 +582,11 @@ class LogLensApp(App[None]):
         """
         if self._cluster_screen is not None:
             self._cluster_screen.dismiss(None)
+            return
+
+        export_input = self.query_one("#export-input", Input)
+        if export_input.display:
+            self._hide_export_input()
             return
 
         search_input = self.query_one("#search-input", Input)
@@ -797,6 +813,57 @@ class LogLensApp(App[None]):
         self._render_window(target_seq, force=True)
         self.query_one("#tail-log", RichLog).focus()
         self._refresh_status()
+
+    # -- export (w, Enter, Escape) -------------------------------------------
+
+    def action_focus_export(self) -> None:
+        """Reveal the export input, prefilled with a timestamped default
+        filename, and focus it. Unlike filter/search there's no prior state
+        to restore - a fresh default is generated every time this opens.
+        """
+        input_widget = self.query_one("#export-input", Input)
+        input_widget.value = self._default_export_filename()
+        input_widget.display = True
+        input_widget.focus()
+        self._refresh_status()
+
+    def _default_export_filename(self) -> str:
+        return datetime.now().strftime("loglens-export-%Y%m%d-%H%M%S.log")
+
+    def _submit_export(self, input_widget: Input) -> None:
+        """Enter in the export input: write the current filtered snapshot
+        (the whole buffer under filter_pattern / errors_only, not the
+        rendered tail) to the given path as raw lines, newline-terminated.
+
+        Uses exclusive create so an existing file is never silently
+        overwritten. That case, and any other OSError (bad directory,
+        permission), get the same treatment: report it via the notify toast
+        and leave the input open so the path can be fixed without losing
+        what was typed. Nothing here touches pause state, the rendered
+        view, or _last_seq - exporting must not disturb what's on screen.
+        """
+        path = input_widget.value
+        filtered, _ = self._filtered_snapshot()
+
+        try:
+            with open(path, "x", encoding="utf-8") as handle:
+                for _, line in filtered:
+                    handle.write(line.raw + "\n")
+        except FileExistsError:
+            self.notify(f"file exists: {path}", severity="error")
+            return
+        except OSError as error:
+            self.notify(str(error), severity="error")
+            return
+
+        self.notify(f"wrote {len(filtered)} lines to {path}")
+        self._hide_export_input()
+
+    def _hide_export_input(self) -> None:
+        input_widget = self.query_one("#export-input", Input)
+        input_widget.display = False
+        self._refresh_status()
+        self.query_one("#tail-log", RichLog).focus()
 
     # -- rendering -----------------------------------------------------------
 
