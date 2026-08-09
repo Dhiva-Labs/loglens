@@ -9,7 +9,7 @@ A terminal UI for tailing and analyzing multiple log files live, with format aut
 <!-- demo.gif: terminal recording goes here -->
 
 ```
- LogLens v0.1.0  [app.log ]  [api.log ]  lines: 8421
+ LogLens v0.2.0  [app.log ]  [api.log ]  lines: 8421
 
  [app.log ] 14:22:01 INFO  request completed in 42ms
  [api.log ] 14:22:01 WARN  retrying after backoff of 2s
@@ -21,7 +21,7 @@ A terminal UI for tailing and analyzing multiple log files live, with format aut
 
  errors/min · 15m · peak 4        ▁▂▃▅█▃▂▁▁▂▃▄▂▁▁
 
- / filter   s search   e errors   p pause   t histogram   q quit
+ q quit   / filter   s search   e errors   p pause   t histogram   c clusters   w export
 ```
 
 ## Features
@@ -34,6 +34,8 @@ A terminal UI for tailing and analyzing multiple log files live, with format aut
 - **Pause with free scrollback** (`p`) — freeze the tail and scroll through what's on screen without new lines pushing it around
 - **Buffer search** (`s`) with `n`/`N` navigation across the whole buffer, not just what's currently rendered
 - **Error-frequency sparkline** (`t`) — a per-minute histogram of recent errors
+- **Error clustering view** (`c`) — groups similar errors and stack traces over the whole buffer into a ranked list with `[×N]` counts; `Enter` jumps to the newest occurrence
+- **Export** (`w`) — writes the currently filtered view (the whole buffer under any active filter, raw lines) to a file, never overwriting an existing one
 - **Log-rotation handling** — truncation and rename+recreate (logrotate-style) are both detected and the tail picks back up cleanly
 - **100k-line capped ring buffer** per session, oldest lines evicted first
 
@@ -79,9 +81,11 @@ loglens demo.log
 | `n` | Jump to the next older match, wrapping to the newest. |
 | `N` | Jump to the next newer match, wrapping to the oldest. |
 | `t` | Toggle the error-frequency histogram. |
+| `c` | Toggle the error-clustering panel — a modal listing similar errors and stack traces grouped over the whole buffer, ranked by count. `Enter` on a row jumps to that cluster's newest occurrence and auto-pauses; `c` or `Esc` closes the panel. |
+| `w` | Open export. Prefilled with a timestamped filename; `Enter` writes the currently filtered view (whole buffer under the active filter/errors-only, raw lines) to that path. Existing files are never overwritten; `Esc` cancels. |
 | `q` | Quit. |
 | `↑` `↓` `PgUp` `PgDn` | Scroll the log view. |
-| `Esc` | Context-sensitive: closes the search box if it's open, otherwise clears an active search if one has been run, otherwise clears the regex filter. |
+| `Esc` | Context-sensitive, checked in this order: closes the cluster panel if it's open, otherwise closes the export box if it's open, otherwise closes the search box if it's open, otherwise clears an active search if one has been run, otherwise clears the regex filter. |
 
 ## Format support
 
