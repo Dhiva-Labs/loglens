@@ -1,0 +1,56 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "loglens"
+description = "A terminal UI for tailing and analyzing multiple log files live, with filtering and format detection."
+readme = "README.md"
+requires-python = ">=3.10"
+license = "MIT"
+authors = [
+    { name = "Dhivakar Rajaram" },
+]
+dynamic = ["version"]
+dependencies = [
+    "textual>=1.0",
+    "watchdog>=4.0",
+    "click>=8.1",
+]
+classifiers = [
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Environment :: Console",
+    "Topic :: System :: Logging",
+    "License :: OSI Approved :: MIT License",
+    "Development Status :: 3 - Alpha",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.24",
+    "ruff>=0.6",
+]
+
+[project.scripts]
+loglens = "loglens.cli:main"
+
+[project.urls]
+Homepage = "https://dhivalabs.com"
+Repository = "https://github.com/Dhiva-Labs/loglens"
+
+[tool.hatch.version]
+path = "loglens/__init__.py"
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
