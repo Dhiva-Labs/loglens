@@ -2,8 +2,9 @@
 
 A terminal UI for tailing and analyzing multiple log files live, with format auto-detection, filtering, and error tracking.
 
-[![CI](https://github.com/Dhiva-Labs/loglens/actions/workflows/ci.yml/badge.svg)](https://github.com/Dhiva-Labs/loglens/actions/workflows/ci.yml)
+[![ARM64 builds](https://github.com/Dhiva-Labs/loglens/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/Dhiva-Labs/loglens/actions/workflows/ci.yml)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue.svg)](https://www.python.org/)
+![Linux x64 | arm64](https://img.shields.io/badge/Linux-x64%20%7C%20arm64-informational?logo=linux&logoColor=white)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 
 <!-- demo.gif: terminal recording goes here -->
@@ -54,6 +55,19 @@ pip install -e .
 ```
 
 Requires Python 3.10+. Runs in any Linux/macOS terminal.
+
+### Platforms: Linux x64 and arm64
+
+LogLens is pure Python, so the wheel is architecture-independent: the same
+`loglens-<version>-py3-none-any.whl` installs on x86-64 and on arm64 (aarch64)
+Linux. Nothing needs to be compiled; its dependencies (Textual, Click, watchdog)
+install from pure-Python wheels or, for watchdog, a `manylinux` aarch64 wheel.
+
+CI runs the full test suite on Ubuntu 24.04 (x64) and Ubuntu 24.04 arm64 for
+Python 3.10, 3.11 and 3.12, builds the wheel and sdist on both architectures,
+checks that the two builds are byte-for-byte identical, and installs the wheel
+into a clean virtualenv on each architecture. The built `dist/` files are
+attached to every CI run as artifacts. Windows is not covered by CI.
 
 ## Usage
 
