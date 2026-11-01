@@ -26,21 +26,32 @@ if pid == 0:
     os.environ.update(TERM="xterm-256color", LINES="40", COLUMNS="140")
     os.execv("/usr/bin/loglens", ["loglens", "/tmp/smoke.log"])
 out = b""
-def pump(seconds):
+# Read until the screen shows both markers (or the pty closes), with generous
+# deadlines: on the shared arm64 runners the first frame can take well over
+# the few seconds it takes on x64.
+def pump(seconds, until=None):
     global out
     end = time.time() + seconds
     while time.time() < end:
+        if until and until(out.decode("utf-8", "replace")):
+            return
         if select.select([fd], [], [], 0.1)[0]:
             try:
                 out += os.read(fd, 65536)
             except OSError:
                 return
-pump(6)
+pump(60, lambda t: "LogLens" in t and "smoke-test-marker" in t)
+time.sleep(1)  # let the app finish mounting before the key arrives
 os.write(fd, b"q")
-pump(3)
-done, status = os.waitpid(pid, os.WNOHANG)
+pump(30)
+for _ in range(50):
+    done, status = os.waitpid(pid, os.WNOHANG)
+    if done:
+        break
+    time.sleep(0.1)
 if not done:
     os.kill(pid, 9)
+    print(out.decode("utf-8", "replace")[-3000:])
     sys.exit("FAIL: the TUI did not quit on 'q'")
 text = out.decode("utf-8", "replace")
 if "Traceback" in text:
