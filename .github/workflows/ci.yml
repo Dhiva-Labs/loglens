@@ -5,6 +5,8 @@ on:
     branches: [main]
   pull_request:
   workflow_dispatch:
+  release:
+    types: [published]
 
 permissions:
   contents: read
@@ -153,4 +155,162 @@ jobs:
             echo "  x64   $a"
             echo "  arm64 $b"
             test "$a" = "$b"
+          done
+
+  # The .rpm (Fedora, RHEL, openSUSE) and the Arch package, made from the
+  # wheel the build job produced. The wheel is pure Python, so both packages
+  # are architecture-independent: built once here, installed and run on
+  # x86_64 and aarch64 by the "distros" job.
+  packages:
+    name: rpm and Arch packages
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      NFPM_VERSION: '2.48.0'
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v8
+        with:
+          name: loglens-dist-x64
+          path: wheel
+      - name: Package version
+        id: v
+        env:
+          TAG: ${{ github.event.release.tag_name }}
+        run: |
+          version="$(sed -n 's/^__version__ = "\(.*\)"$/\1/p' loglens/__init__.py)"
+          test -n "$version"
+          if [ -n "$TAG" ] && [ "$TAG" != "v$version" ]; then
+            echo "::error::release $TAG does not match __version__ $version"
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+      - name: Install nfpm
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/bin"
+          cd "$RUNNER_TEMP/bin"
+          tarball="nfpm_${NFPM_VERSION}_Linux_x86_64.tar.gz"
+          gh release download "v$NFPM_VERSION" -R goreleaser/nfpm -p "$tarball" -p checksums.txt
+          grep " $tarball\$" checksums.txt | sha256sum -c -
+          tar -xzf "$tarball" nfpm
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+      - name: Build the .rpm and the Arch package
+        env:
+          VERSION: ${{ steps.v.outputs.version }}
+        run: |
+          packaging/linux-distros/build-tree.sh "wheel/loglens-$VERSION-py3-none-any.whl" "$RUNNER_TEMP/root"
+          packaging/linux-distros/pack.sh "$RUNNER_TEMP/root" amd64 dist
+      - uses: actions/upload-artifact@v7
+        with:
+          name: distros
+          path: |
+            dist/*.rpm
+            dist/*.pkg.tar.zst
+          if-no-files-found: error
+
+  # Installs the packages on Fedora, openSUSE Tumbleweed and Arch Linux and
+  # runs packaging/linux-distros/smoke.sh there (--version, the TUI in a pty,
+  # and tests/ against the installed copy and the distribution's textual,
+  # watchdog and click). arm64 has no official Arch image, so the Arch
+  # package gets a static check on that leg.
+  distros:
+    name: Other distros ${{ matrix.arch }}
+    needs: packages
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { arch: x64, deb_arch: amd64, runner: ubuntu-24.04 }
+          - { arch: arm64, deb_arch: arm64, runner: ubuntu-24.04-arm }
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v8
+        with:
+          name: distros
+          path: dist
+      - name: Install and run on Fedora, openSUSE and Arch
+        run: packaging/linux-distros/verify.sh dist ${{ matrix.deb_arch }}
+
+  # AUR recipe: PKGBUILD + .SRCINFO, rendered with the checksum of GitHub's
+  # archive of the release tag and proven with makepkg (including the test
+  # suite in check()) on archlinux:latest. Before the tag exists, a git
+  # archive of this commit stands in (its checksum differs from GitHub's, so
+  # that PKGBUILD is a build check only).
+  aur:
+    name: AUR PKGBUILD
+    needs: packages
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      VERSION: ${{ needs.packages.outputs.version }}
+    steps:
+      - uses: actions/checkout@v7
+      - name: Source archive
+        run: |
+          tag="v$VERSION"
+          if [ "$GITHUB_EVENT_NAME" = release ] || git ls-remote --exit-code --tags origin "refs/tags/$tag" > /dev/null; then
+            curl -fsSL -o "$RUNNER_TEMP/source.tar.gz" "https://github.com/$GITHUB_REPOSITORY/archive/refs/tags/$tag.tar.gz"
+          else
+            echo "::notice::tag $tag does not exist yet; checking the PKGBUILD against git archive HEAD"
+            git archive --format=tar.gz --prefix="loglens-$VERSION/" -o "$RUNNER_TEMP/source.tar.gz" HEAD
+          fi
+          tar -tzf "$RUNNER_TEMP/source.tar.gz" "loglens-$VERSION/pyproject.toml"
+      - name: Render and check the PKGBUILD
+        run: packaging/arch/aur.sh "$RUNNER_TEMP/source.tar.gz" dist
+      - uses: actions/upload-artifact@v7
+        with:
+          name: aur
+          path: dist/*-aur.tar.gz
+          if-no-files-found: error
+
+  # Releases are published by hand. This attaches the packages to a newly
+  # published release, skipping any name the release already has. On other
+  # events it only checks that every expected file was built.
+  release:
+    name: Release assets
+    needs: [lint, test, packages, distros, aur]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      TAG: ${{ github.event.release.tag_name }}
+      VERSION: ${{ needs.packages.outputs.version }}
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          name: distros
+          path: assets
+      - uses: actions/download-artifact@v8
+        with:
+          name: aur
+          path: assets
+      - name: Check the release assets
+        run: |
+          ls -l assets
+          for f in "loglens-$VERSION-1.noarch.rpm" "loglens-$VERSION-1-any.pkg.tar.zst" \
+                   "loglens-$VERSION-aur.tar.gz"; do
+            test -f "assets/$f" || { echo "::error::missing $f"; exit 1; }
+          done
+          test "$(ls assets | wc -l)" -eq 3
+      - name: Upload to release ${{ github.event.release.tag_name }}
+        if: github.event_name == 'release'
+        run: |
+          existing="$(gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json assets -q '.assets[].name')"
+          for f in assets/*; do
+            name="$(basename "$f")"
+            if printf '%s\n' "$existing" | grep -qxF -- "$name"; then
+              echo "skip $name (already on the release)"
+            else
+              echo "upload $name"
+              gh release upload "$TAG" "$f" --repo "$GITHUB_REPOSITORY"
+            fi
           done

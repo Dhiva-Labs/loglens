@@ -7,6 +7,7 @@ All notable changes to this project are documented in this file. The format is b
 ### Added
 
 - CI runs the test suite on Linux x64 and Linux arm64 (Python 3.10 to 3.12), builds the wheel and sdist on both, and checks that the pure-Python wheel is identical on both architectures
+- Distribution packages built and tested in CI: a noarch `.rpm` for Fedora, RHEL and openSUSE, an Arch Linux package and an AUR PKGBUILD, using each distribution's own Python, Textual, watchdog and Click. CI installs them on Fedora, openSUSE Tumbleweed and Arch Linux and runs the TUI and the test suite there; a published release gets them attached automatically
 
 ## [0.2.0] - 2026-08-10
 
