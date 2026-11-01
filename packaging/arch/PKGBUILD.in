@@ -1,0 +1,36 @@
+# Maintainer: Dhiva Labs <dhivakar1010@gmail.com>
+#
+# AUR package, built from the release's source archive with the Arch Python
+# packaging tools (LogLens is pure Python, so there is no -bin variant).
+# packaging/arch/aur.sh renders this file for each release (version and
+# checksum) and checks it with makepkg; the rendered PKGBUILD and .SRCINFO
+# are what gets pushed to the AUR.
+pkgname=@NAME@
+pkgver=@VERSION@
+pkgrel=1
+pkgdesc='@SUMMARY@'
+arch=('any')
+url='@HOMEPAGE@'
+license=('@LICENSE@')
+depends=(@ARCH_DEPENDS@)
+makedepends=('python-build' 'python-installer' 'python-hatchling')
+checkdepends=('python-pytest' 'python-pytest-asyncio')
+source=("$pkgname-$pkgver.tar.gz::$url/archive/refs/tags/v$pkgver.tar.gz")
+sha256sums=('@SHA256@')
+
+build() {
+  cd "$pkgname-$pkgver"
+  python -m build --wheel --no-isolation
+}
+
+check() {
+  cd "$pkgname-$pkgver"
+  python -m pytest -q
+}
+
+package() {
+  cd "$pkgname-$pkgver"
+  python -m installer --destdir="$pkgdir" dist/*.whl
+  install -Dm644 -t "$pkgdir/usr/share/doc/$pkgname" README.md CHANGELOG.md
+  install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+}

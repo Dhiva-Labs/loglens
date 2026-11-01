@@ -5,6 +5,7 @@ A terminal UI for tailing and analyzing multiple log files live, with format aut
 [![ARM64 builds](https://github.com/Dhiva-Labs/loglens/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/Dhiva-Labs/loglens/actions/workflows/ci.yml)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue.svg)](https://www.python.org/)
 ![Linux x64 | arm64](https://img.shields.io/badge/Linux-x64%20%7C%20arm64-informational?logo=linux&logoColor=white)
+![Linux: rpm | Arch](https://img.shields.io/badge/Linux-rpm%20%7C%20Arch-informational?logo=linux&logoColor=white)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 
 <!-- demo.gif: terminal recording goes here -->
@@ -55,6 +56,30 @@ pip install -e .
 ```
 
 Requires Python 3.10+. Runs in any Linux/macOS terminal.
+
+### Linux distribution packages
+
+From the next release on, each GitHub release carries packages that install
+LogLens with the distribution's own Python, Textual, watchdog and Click. They
+are architecture-independent (one file for x86-64 and arm64):
+
+| Distribution | File | Install |
+|---|---|---|
+| Fedora, RHEL/Rocky/Alma | `loglens-<version>-1.noarch.rpm` | `sudo dnf install ./loglens-<version>-1.noarch.rpm` |
+| openSUSE Tumbleweed | the same `.rpm` | `sudo zypper install --allow-unsigned-rpm ./loglens-<version>-1.noarch.rpm` |
+| Arch, Manjaro, EndeavourOS | `loglens-<version>-1-any.pkg.tar.zst` | `sudo pacman -U ./loglens-<version>-1-any.pkg.tar.zst` |
+| AUR | `loglens-<version>-aur.tar.gz` (PKGBUILD + .SRCINFO) | `loglens` in the AUR once published |
+
+The `.rpm` and the Arch package keep the code in `/usr/share/loglens` with a
+`/usr/bin/loglens` launcher, so they do not depend on one Python minor
+version; the AUR PKGBUILD builds from source into site-packages the Arch way.
+The distribution must package Textual 1.0 or newer (Fedora, openSUSE Tumbleweed and Arch do).
+The `.rpm` is unsigned, hence zypper's `--allow-unsigned-rpm`. CI installs
+each package on Fedora, openSUSE Tumbleweed and Arch Linux (x86-64), and on
+Fedora and openSUSE arm64, then runs `loglens --version`, the TUI on a log
+file in a pty, and the test suite against the installed copy; Arch Linux has
+no official arm64 image, so on arm64 the Arch package gets a static check
+only. There is no AppImage or Flatpak: LogLens is a terminal tool.
 
 ### Platforms: Linux x64 and arm64
 
