@@ -84,5 +84,16 @@ print("loglens", loglens.__version__, loglens.__file__)
 print("python", sys.version.split()[0], *(f"{m} {version(m)}" for m in ("textual", "watchdog", "click")))
 assert loglens.__file__.startswith(sys.argv[1]), (loglens.__file__, sys.argv[1])
 PY
-python3 -m pytest -q -p no:cacheprovider tests
+# The tests read a widget's text through Static.content, the name textual 6.0
+# gave Static.renderable. Fedora 44 ships textual 4.0 (the app itself only
+# calls Static.update and runs fine there), so on textual < 6 the suite gets
+# an alias that returns the same stored value; textual's own code is unchanged.
+cat > /tmp/suite/textual_compat.py <<'PY'
+from textual.widgets import Static
+
+if not hasattr(Static, "content"):
+    Static.content = property(lambda self: self.renderable)
+PY
+PYTHONPATH="/tmp/suite${PYTHONPATH:+:$PYTHONPATH}" \
+  python3 -m pytest -q -p no:cacheprovider -p textual_compat tests
 echo "loglens smoke test passed"
