@@ -2,6 +2,8 @@
 
 A terminal UI for tailing and analyzing multiple log files live, with format auto-detection, filtering, and error tracking.
 
+**Documentation:** step-by-step guides at [learn.dhivalabs.com](https://learn.dhivalabs.com/apps/loglens/): [install](https://learn.dhivalabs.com/apps/loglens/install) · [beginner guide](https://learn.dhivalabs.com/apps/loglens/getting-started) · [troubleshooting](https://learn.dhivalabs.com/apps/loglens/faq). New to the topic? Try the [Linux and the terminal](https://learn.dhivalabs.com/tracks/terminal/) learning track.
+
 [![ARM64 builds](https://github.com/Dhiva-Labs/loglens/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/Dhiva-Labs/loglens/actions/workflows/ci.yml)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue.svg)](https://www.python.org/)
 ![Linux x64 | arm64](https://img.shields.io/badge/Linux-x64%20%7C%20arm64-informational?logo=linux&logoColor=white)
